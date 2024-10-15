@@ -1,0 +1,2 @@
+FarmGovernorTest:testCantUpdateSeedWithoutGovernance() (gas: 10567)
+FarmGovernorTest:testGovernanceUpdatesSeed() (gas: 489992)

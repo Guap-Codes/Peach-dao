@@ -1,0 +1,136 @@
+// This combined approach gives you both specific  
+// scenario testing and fuzz testing in a single file, 
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.19;
+
+import {Test} from "forge-std/Test.sol";
+import {FarmGovernor} from "../src/FarmGovernor.sol";
+import {PeachToken} from "../src/PeachToken.sol";
+import {TimeLock} from "../src/TimeLock.sol";
+import {Seed} from "../src/Seed.sol";
+import {console} from "forge-std/console.sol";
+
+contract FarmGovernorTest is Test {
+    PeachToken token;
+    TimeLock timelock;
+    FarmGovernor governor;
+    Seed seed;
+
+    uint256 public constant MIN_DELAY = 3600; // 1 hour - after a vote passes, you have 1 hour before you can enact
+    uint256 public constant QUORUM_PERCENTAGE = 4; // Need 4% of voters to pass
+    uint256 public constant VOTING_PERIOD = 50400; // This is how long voting lasts
+    uint256 public constant VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+
+    address[] proposers;
+    address[] executors;
+
+    bytes[] functionCalls;
+    address[] addressesToCall;
+    uint256[] values;
+
+    address public constant VOTER = address(1);
+
+    function setUp() public {
+        token = new PeachToken();
+        token.mint(VOTER, 100e18);
+
+        vm.prank(VOTER);
+        token.delegate(VOTER);
+        timelock = new TimeLock(MIN_DELAY, proposers, executors);
+        governor = new FarmGovernor(token, timelock, token); // Using PeachToken as both governance and reward token
+
+        bytes32 proposerRole = timelock.PROPOSER_ROLE();
+        bytes32 executorRole = timelock.EXECUTOR_ROLE();
+        bytes32 adminRole = timelock.TIMELOCK_ADMIN_ROLE();
+
+        timelock.grantRole(proposerRole, address(governor));
+        timelock.grantRole(executorRole, address(0));
+        timelock.revokeRole(adminRole, msg.sender);
+
+        seed = new Seed();
+        seed.grantRole(seed.DEFAULT_ADMIN_ROLE(), address(timelock));
+        seed.grantRole(seed.STORE_ROLE(), address(governor));
+        seed.grantRole(seed.PAUSER_ROLE(), address(governor));
+
+        governor.grantRole(governor.GOVERNOR_ROLE(), address(this));
+    }
+
+    function testCantUpdateSeedWithoutGovernance() public {
+        vm.expectRevert();
+        seed.store(1);
+    }
+
+    function testGovernanceUpdatesSeed() public {
+        uint256 valueToStore = 777;
+        string memory description = "Store 777 in Seed";
+        bytes memory encodedFunctionCall = abi.encodeWithSignature("store(uint256)", valueToStore);
+        addressesToCall.push(address(seed));
+        values.push(0);
+        functionCalls.push(encodedFunctionCall);
+
+        // 1. Propose to the DAO
+        uint256 proposalId = governor.propose(addressesToCall, values, functionCalls, description);
+        assertEq(uint256(governor.state(proposalId)), uint256(IGovernor.ProposalState.Pending), "Proposal should be pending");
+
+        vm.warp(block.timestamp + VOTING_DELAY + 1);
+        vm.roll(block.number + VOTING_DELAY + 1);
+        assertEq(uint256(governor.state(proposalId)), uint256(IGovernor.ProposalState.Active), "Proposal should be active");
+
+        // 2. Vote
+        string memory reason = "I want the farm to grow";
+        uint8 voteWay = 1; // 0 = Against, 1 = For, 2 = Abstain for this example
+        vm.prank(VOTER);
+        governor.castVoteWithReason(proposalId, voteWay, reason);
+
+        vm.warp(block.timestamp + VOTING_PERIOD + 1);
+        vm.roll(block.number + VOTING_PERIOD + 1);
+        assertEq(uint256(governor.state(proposalId)), uint256(IGovernor.ProposalState.Succeeded), "Proposal should have succeeded");
+
+        // 3. Queue
+        bytes32 descriptionHash = keccak256(abi.encodePacked(description));
+        governor.queue(addressesToCall, values, functionCalls, descriptionHash);
+        assertEq(uint256(governor.state(proposalId)), uint256(IGovernor.ProposalState.Queued), "Proposal should be queued");
+
+        vm.roll(block.number + MIN_DELAY + 1);
+        vm.warp(block.timestamp + MIN_DELAY + 1);
+
+        // 4. Execute
+        governor.execute(addressesToCall, values, functionCalls, descriptionHash);
+        assertEq(uint256(governor.state(proposalId)), uint256(IGovernor.ProposalState.Executed), "Proposal should be executed");
+
+        assertEq(seed.retrieve(), valueToStore, "Stored value should match the proposed value");
+    }
+
+    function testFuzzGovernanceUpdatesSeed(uint256 valueToStore) public {
+        valueToStore = bound(valueToStore, 0, type(uint256).max);
+
+        string memory description = "Store random value in Seed";
+        bytes memory encodedFunctionCall = abi.encodeWithSignature("store(uint256)", valueToStore);
+        addressesToCall.push(address(seed));
+        values.push(0);
+        functionCalls.push(encodedFunctionCall);
+
+        uint256 proposalId = governor.propose(addressesToCall, values, functionCalls, description);
+
+        vm.warp(block.timestamp + VOTING_DELAY + 1);
+        vm.roll(block.number + VOTING_DELAY + 1);
+
+        vm.prank(VOTER);
+        governor.castVote(proposalId, 1);
+
+        vm.warp(block.timestamp + VOTING_PERIOD + 1);
+        vm.roll(block.number + VOTING_PERIOD + 1);
+
+        bytes32 descriptionHash = keccak256(abi.encodePacked(description));
+        governor.queue(addressesToCall, values, functionCalls, descriptionHash);
+
+        vm.roll(block.number + MIN_DELAY + 1);
+        vm.warp(block.timestamp + MIN_DELAY + 1);
+
+        governor.execute(addressesToCall, values, functionCalls, descriptionHash);
+
+        assertEq(seed.retrieve(), valueToStore, "Stored value should match the proposed value");
+    }
+}
