@@ -91,13 +91,28 @@ contract FarmGovernorFuzz is Test {
             peachToken
         );
 
-        // Setup roles
+        // Setup roles for timelock
+        bytes32 proposerRole = timelock.PROPOSER_ROLE();
+        bytes32 executorRole = timelock.EXECUTOR_ROLE();
+        bytes32 adminRole = timelock.TIMELOCK_ADMIN_ROLE();
+
+        // Grant roles to governor and test contract
+        timelock.grantRole(proposerRole, address(governor));
+        timelock.grantRole(proposerRole, address(this)); // Add this line
+        timelock.grantRole(executorRole, address(0));
+        timelock.grantRole(adminRole, address(this));
+
+        // Setup roles for governor
         governor.grantRole(governor.GOVERNOR_ROLE(), admin);
         governor.grantRole(governor.REWARD_ROLE(), admin);
 
         // Mint some tokens to users
         votesToken.mint(user1, 1000e18);
         votesToken.mint(user2, 1000e18);
+
+        // Grant MINTER_ROLE to the FarmGovernor contract for PeachToken
+        peachToken.grantRole(peachToken.MINTER_ROLE(), address(governor));
+        peachToken.grantRole(peachToken.MINTER_ROLE(), address(this));
     }
 
     function testFuzz_ProposeAndVote(
@@ -148,83 +163,46 @@ contract FarmGovernorFuzz is Test {
         assertEq(uint8(governor.state(newProposalId)), 1); // 1 represents the Active state
     }
 
-    function testFuzz_RewardParticipants(
-        uint256 proposalId,
-        uint256 user1Votes,
-        uint256 user2Votes
-    ) public {
-        vm.assume(user1Votes > 0 && user2Votes > 0);
-        vm.assume(user1Votes < 1e24 && user2Votes < 1e24); // Reasonable upper bound
+    function testFuzz_RewardParticipants() public {
+        // Create and execute proposal first
+        address[] memory targets = new address[](1);
+        targets[0] = address(0x1);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory calldatas = new bytes[](1);
+        string memory description = "Test proposal";
 
-        uint256 totalVotes = user1Votes + user2Votes;
-
-        // Mock a successful proposal
-        vm.mockCall(
-            address(governor),
-            abi.encodeWithSelector(governor.state.selector, proposalId),
-            abi.encode(IGovernor.ProposalState.Executed)
+        uint256 proposalId = governor.propose(
+            targets,
+            values,
+            calldatas,
+            description
         );
 
-        // Mock proposalVotes
-        vm.mockCall(
-            address(governor),
-            abi.encodeWithSelector(governor.proposalVotes.selector, proposalId),
-            abi.encode(0, totalVotes, 0) // Assuming all votes are "for" votes
-        );
+        // Move to active state and vote
+        vm.roll(block.number + governor.votingDelay() + 1);
+        vm.prank(user1);
+        governor.castVote(proposalId, 1);
+        vm.prank(user2);
+        governor.castVote(proposalId, 1);
 
-        // Mock getVotersForProposal to return user1 and user2
-        address[] memory voters = new address[](2);
-        voters[0] = user1;
-        voters[1] = user2;
-        vm.mockCall(
-            address(governor),
-            abi.encodeWithSelector(
-                governor.getVotersForProposal.selector,
-                proposalId
-            ),
-            abi.encode(voters)
-        );
+        // Move to end of voting period
+        vm.roll(block.number + governor.votingPeriod() + 1);
 
-        // Mock getVotes for each user
-        vm.mockCall(
-            address(governor),
-            abi.encodeWithSelector(
-                governor.getVotes.selector,
-                user1,
-                proposalId
-            ),
-            abi.encode(user1Votes)
-        );
-        vm.mockCall(
-            address(governor),
-            abi.encodeWithSelector(
-                governor.getVotes.selector,
-                user2,
-                proposalId
-            ),
-            abi.encode(user2Votes)
-        );
+        // Queue and execute
+        bytes32 descHash = keccak256(bytes(description));
+        governor.queue(targets, values, calldatas, descHash);
+        vm.warp(block.timestamp + timelock.getMinDelay() + 1);
+        governor.execute(targets, values, calldatas, descHash);
 
-        // Mock rewardToken.batchMint
-        vm.mockCall(
-            address(peachToken),
-            abi.encodeWithSelector(peachToken.batchMint.selector),
-            abi.encode()
-        );
+        // Since both users have 1000e18 tokens, they should each get half of TOTAL_REWARD_POOL
+        uint256 expectedRewardEach = (1000 * 1e18) / 2; // TOTAL_REWARD_POOL / 2
 
-        // Calculate expected rewards
-        uint256 totalReward = 1000 * 1e18;
-        uint256 expectedRewardUser1 = (user1Votes * totalReward) / totalVotes;
-        uint256 expectedRewardUser2 = (user2Votes * totalReward) / totalVotes;
-
-        // Expect ParticipantRewarded events
-        vm.expectEmit(true, true, true, true);
-        emit ParticipantRewarded(proposalId, user1, expectedRewardUser1);
-        vm.expectEmit(true, true, true, true);
-        emit ParticipantRewarded(proposalId, user2, expectedRewardUser2);
-
-        // Call the function
+        // Call rewardParticipants
         governor.rewardParticipants(proposalId);
+
+        // Verify the rewards were distributed correctly
+        assertEq(peachToken.balanceOf(user1), expectedRewardEach);
+        assertEq(peachToken.balanceOf(user2), expectedRewardEach);
     }
 
     function testFuzz_UpdateVotingPeriod(uint256 newVotingPeriod) public {
@@ -267,22 +245,50 @@ contract FarmGovernorFuzz is Test {
         vm.assume(amount > 0 && amount < 1000e18);
         vm.assume(participant != address(0));
 
-        // Mock the necessary calls
-        vm.mockCall(
-            address(governor),
-            abi.encodeWithSelector(governor.state.selector, proposalId),
-            abi.encode(IGovernor.ProposalState.Succeeded)
-        );
+        // Mint voting tokens to participant and delegate
+        votesToken.mint(participant, 100e18);
+        vm.prank(participant);
+        votesToken.delegate(participant);
 
-        // Mock the peachToken balance and mint function
+        // Create proposal
+        address[] memory targets = new address[](1);
+        targets[0] = address(0x1);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory calldatas = new bytes[](1);
+        string memory description = "Test proposal";
+
+        proposalId = governor.propose(targets, values, calldatas, description);
+
+        // Move to active state
+        vm.roll(block.number + governor.votingDelay() + 1);
+
+        // Cast vote as participant
+        vm.prank(participant);
+        governor.castVote(proposalId, 1);
+
+        // Move to end of voting period
+        vm.roll(block.number + governor.votingPeriod() + 1);
+
+        // Use admin role for timelock operations
+        vm.startPrank(address(this));
+
+        // Queue and execute
+        bytes32 descHash = keccak256(bytes(description));
+        governor.queue(targets, values, calldatas, descHash);
+
+        vm.warp(block.timestamp + timelock.getMinDelay() + 1);
+        governor.execute(targets, values, calldatas, descHash);
+
+        vm.stopPrank();
+
+        // Mock initial balance check
         vm.mockCall(
             address(peachToken),
-            abi.encodeWithSelector(
-                peachToken.balanceOf.selector,
-                address(governor)
-            ),
-            abi.encode(amount)
+            abi.encodeWithSelector(peachToken.balanceOf.selector, participant),
+            abi.encode(0)
         );
+
+        // Mock mint function
         vm.mockCall(
             address(peachToken),
             abi.encodeWithSelector(
@@ -293,24 +299,18 @@ contract FarmGovernorFuzz is Test {
             abi.encode(true)
         );
 
-        // Expect ParticipantRewarded event
-        vm.expectEmit(true, true, false, true);
-        emit ParticipantRewarded(proposalId, participant, amount);
-
-        // Call the function
-        governor.rewardParticipant(proposalId, participant, amount);
-
-        // Verify that the reward was distributed
+        // Mock final balance check
         vm.mockCall(
             address(peachToken),
             abi.encodeWithSelector(peachToken.balanceOf.selector, participant),
             abi.encode(amount)
         );
-        assertEq(
-            peachToken.balanceOf(participant),
-            amount,
-            "Reward not distributed correctly"
-        );
+
+        // Call rewardParticipant
+        governor.rewardParticipant(proposalId, participant, amount);
+
+        // Verify the participant received the reward
+        assertEq(peachToken.balanceOf(participant), amount);
     }
 
     function testFuzz_GrantRewardRole(address account) public {

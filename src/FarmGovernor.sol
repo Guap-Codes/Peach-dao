@@ -163,6 +163,13 @@ contract FarmGovernor is
         return super.quorum(blockNumber);
     }
 
+    /**
+     * @dev Returns the quorum numerator.
+     */
+    function quorumNumerator() public view override returns (uint256) {
+        return _quorumNumerator;
+    }
+
     function state(
         uint256 proposalId
     )
@@ -280,7 +287,7 @@ contract FarmGovernor is
     function updateQuorumFraction(
         uint256 newQuorumFraction
     ) external onlyRole(GOVERNOR_ROLE) {
-        _quorumNumerator = newQuorumFraction;
+        _updateQuorumNumerator(newQuorumFraction);
         emit QuorumFractionUpdated(newQuorumFraction);
     }
 

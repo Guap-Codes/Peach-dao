@@ -1,6 +1,6 @@
-# FarmGovernor
+# Peach-Dao
 
-FarmGovernor is a custom implementation of a governance contract using OpenZeppelin's framework with added functionalities. It's designed to manage decentralized decision-making processes for a farming or agricultural-related decentralized application (DApp).
+Peach-Dao is a custom implementation of a governance contract using OpenZeppelin's framework with added functionalities. It's designed to manage decentralized decision-making processes for a farming or agricultural-related decentralized application (DApp).
 
 ## Features
 

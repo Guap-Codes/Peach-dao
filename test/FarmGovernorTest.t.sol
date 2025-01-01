@@ -33,6 +33,11 @@ contract FarmGovernorTest is Test {
 
     function setUp() public {
         token = new PeachToken();
+
+        // Grant MINTER_ROLE to the test contract first
+        token.grantRole(token.MINTER_ROLE(), address(this));
+
+        // Initial token minting
         token.mint(VOTER, 100e18);
         token.mint(VOTER2, 100e18);
         token.mint(VOTER3, 100e18);
@@ -46,6 +51,9 @@ contract FarmGovernorTest is Test {
 
         timelock = new TimeLock(MIN_DELAY, proposers, executors);
         governor = new FarmGovernor(token, timelock, token); // Using PeachToken as both governance and reward token
+
+        // Grant MINTER_ROLE to the governor
+        token.grantRole(token.MINTER_ROLE(), address(governor));
 
         bytes32 proposerRole = timelock.PROPOSER_ROLE();
         bytes32 executorRole = timelock.EXECUTOR_ROLE();
@@ -66,6 +74,9 @@ contract FarmGovernorTest is Test {
         // Grant roles to the test contract
         governor.grantRole(governor.DEFAULT_ADMIN_ROLE(), address(this));
         governor.grantRole(governor.GOVERNOR_ROLE(), address(this));
+
+        // Add this line to grant DEFAULT_ADMIN_ROLE to the governor contract itself
+        governor.grantRole(governor.DEFAULT_ADMIN_ROLE(), address(governor));
     }
 
     function testCantUpdateSeedWithoutGovernance() public {
@@ -405,38 +416,47 @@ contract FarmGovernorTest is Test {
             descriptionHash
         );
 
-        // Ensure the governor has enough tokens to reward participants
-        uint256 rewardAmount = 10e18; // Adjust this value based on your reward logic
-        token.mint(address(governor), rewardAmount * 2); // Mint enough for both voters
-
-        uint256 initialBalance = token.balanceOf(VOTER);
-        uint256 initialGovernorBalance = token.balanceOf(address(governor));
+        uint256 initialVoterBalance = token.balanceOf(VOTER);
+        uint256 initialVoter2Balance = token.balanceOf(VOTER2);
+        uint256 initialTotalSupply = token.totalSupply();
 
         // Grant the REWARD_ROLE to the test contract
         bytes32 rewardRole = governor.REWARD_ROLE();
-        vm.prank(address(governor));
         governor.grantRole(rewardRole, address(this));
 
         // Call rewardParticipants
         governor.rewardParticipants(proposalId);
 
-        uint256 finalBalance = token.balanceOf(VOTER);
-        uint256 finalGovernorBalance = token.balanceOf(address(governor));
+        uint256 finalVoterBalance = token.balanceOf(VOTER);
+        uint256 finalVoter2Balance = token.balanceOf(VOTER2);
+        uint256 finalTotalSupply = token.totalSupply();
 
-        console.log("Initial VOTER balance:", initialBalance);
-        console.log("Final VOTER balance:", finalBalance);
-        console.log("Initial Governor balance:", initialGovernorBalance);
-        console.log("Final Governor balance:", finalGovernorBalance);
-
-        assertGt(
-            finalBalance,
-            initialBalance,
-            "VOTER balance should increase after reward"
+        console.log("Initial VOTER balance:", initialVoterBalance);
+        console.log("Final VOTER balance:", finalVoterBalance);
+        console.log("Initial VOTER2 balance:", initialVoter2Balance);
+        console.log("Final VOTER2 balance:", finalVoter2Balance);
+        console.log(
+            "Total supply change:",
+            finalTotalSupply - initialTotalSupply
         );
-        assertLt(
-            finalGovernorBalance,
-            initialGovernorBalance,
-            "Governor balance should decrease after reward"
+
+        // Assert that balances increased
+        assertGt(
+            finalVoterBalance,
+            initialVoterBalance,
+            "VOTER balance should increase"
+        );
+        assertGt(
+            finalVoter2Balance,
+            initialVoter2Balance,
+            "VOTER2 balance should increase"
+        );
+
+        // Assert that new tokens were minted
+        assertGt(
+            finalTotalSupply,
+            initialTotalSupply,
+            "Total supply should increase"
         );
     }
 
